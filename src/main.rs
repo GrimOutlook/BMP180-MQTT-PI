@@ -50,6 +50,11 @@ struct Args {
     config: String
 }
 
+enum SensorComponent {
+    Temperature,
+    Pressure
+}
+
 #[tokio::main]
 async fn main() -> Result<(), ExitCode> {
     info!("Starting BMP180 Temperature/Pressure Sensor");
@@ -142,8 +147,50 @@ fn read_from_sensor(sensor: &mut BMP085BarometerThermometer<LinuxI2CDevice>) -> 
 }
 
 async fn publish_sensor_data(client: &AsyncClient, config: &Data, temp: f32, pressure: f32) {
-    debug!("Publishing sensor data to topic [{}]", &config.mqtt.topic);
-    let temperature_msg = format!("{{\"temperature\": {0}}}", temp);
-    let pressure_msg = format!("{{\"pressure\": {0}}}", pressure);
-    client.publish(&config.mqtt.topic, QoS::AtLeastOnce, true, msg).await.unwrap();
+    publish_temperature(client, config, temp);
+    publish_pressure(client, config, pressure);
+}
+
+async fn publish_temperature(client: &AsyncClient, config: &Data, temp: f32) {
+    let topic = format!("homeassistant/sensor/{}Temperature}/config", config.mqtt.room);
+    debug!("Publishing sensor data to topic [{}]", topic);
+    let msg = get_message(config, SensorComponent::Temperature, temp)
+    client.publish(topic, QoS::AtLeastOnce, true, msg).await.unwrap();
+}
+
+async fn publish_pressure(client: &AsyncClient, config: &Data, pressure: f32) {
+    let topic = format!("homeassistant/sensor/{}Pressure}/config", config.mqtt.room);
+    debug!("Publishing sensor data to topic [{}]", topic);
+    let msg = get_message(config, SensorComponent::Pressure, pressure)
+    client.publish(topic, QoS::AtLeastOnce, true, msg).await.unwrap();
+}
+
+fn get_message(config: &Data, sensor_component: SensorComponent, temp: f32) {
+    let sensor_component_str = match sensor_component {
+        SensorComponent::Temperature => "temperature",
+        SensorComponent::Pressure => "pressure"
+    }
+
+    let temperature_msg = format!(r#"
+{
+   "device_class":"{1}",
+   "state_topic":"homeassistant/sensor/{2}}/state}",
+   "unit_of_measurement":"°C",
+   "value_template":"{0}",
+   "unique_id":"{1}",
+   "device":{
+      "identifiers":[
+          "{3}"
+      ],
+      "name":"{4}"
+   }
+}
+"#,
+    temp,
+    sensor_component_str,
+    config.mqtt.room,
+    config.mqtt.identifier,
+    config.mqtt.name)
+
+    return temperature_msg;
 }

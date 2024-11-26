@@ -1,0 +1,13 @@
+[mqtt_broker]
+ip = "<IP>"
+port = 1883
+username = "<USERNAME>"
+password = "<PASSWORD>"
+
+[mqtt]
+room = "hallway"
+identifier = "0000"
+name = "Thermostat Sensor"
+
+[logging]
+log_level = "Info"
