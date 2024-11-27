@@ -3,11 +3,11 @@ use clap::Parser;
 use i2cdev::linux::*;
 use i2cdev::sensors::{Barometer, Thermometer};
 use log::{info, debug, error};
-use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, QoS};
+use rumqttc::{Client,Connection,Event,Incoming,MqttOptions,QoS};
 use secrecy::{ExposeSecret, SecretBox};
 use serde_derive::Deserialize;
 use std::error::Error;
-use std::fs;
+use std::{fs, thread};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -54,8 +54,7 @@ enum SensorComponent {
     Pressure
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
 
     // Read passed in arguments
     let args = Args::parse();
@@ -79,28 +78,42 @@ async fn main() -> ExitCode {
         },
     };
 
-    let Ok(mut sensor) = BMP085BarometerThermometer::new(i2c_dev, SamplingMode::UltraHighRes) else {
+    let Ok(sensor) = BMP085BarometerThermometer::new(i2c_dev, SamplingMode::UltraHighRes) else {
         error!("Can't initialize PMB180 thermostat sensor");
         return ExitCode::FAILURE;
     };
 
-    let (client, mut eventloop) =  get_mqtt_client(&config);
+    let (client, connection) =  get_mqtt_client(&config);
 
+    thread::spawn(move || {read_and_publish_data(sensor, client, config)});
+    poll_for_events(connection);
+
+    return ExitCode::SUCCESS;
+}
+
+fn read_and_publish_data(mut sensor: BMP085BarometerThermometer<LinuxI2CDevice>, client: Client, config: Data) -> ExitCode {
+    info!("Starting read and publish thread");
+    
     loop {
+        thread::sleep(Duration::from_secs(1));
         let Ok((temp, pressure)) = read_from_sensor(&mut sensor) else {
             error!("Cannot initialize I2C device.");
             return ExitCode::FAILURE;
         };
 
-        match publish_sensor_data(&client, &config, temp, pressure).await {
+        match publish_sensor_data(&client, &config, temp, pressure) {
             Ok(_) => (),
             Err(_) => {
                 return ExitCode::FAILURE
             }
         };
+    }
+}
 
+fn poll_for_events(mut connection: Connection) {
+    loop {
         debug!("Polling for events");
-        while let notification = eventloop.poll().await {
+        for notification in connection.iter() {
             match notification {
                 Ok(Event::Incoming(Incoming::Connect(c))) => debug!("Connected to MQTT broker {}", c.client_id),
                 Ok(e) => {
@@ -110,8 +123,6 @@ async fn main() -> ExitCode {
                     error!("Got an error when polling for events: {}", e.to_string());
                 },
             }
-            std::thread::sleep(Duration::from_millis(100));
-                
         }
     }
 }
@@ -145,14 +156,14 @@ fn read_config(config: PathBuf) -> Result<Data, ExitCode> {
     Ok(data)
 }
 
-fn get_mqtt_client(config: &Data) -> (AsyncClient, EventLoop) {
+fn get_mqtt_client(config: &Data) -> (Client, Connection) {
     let mut mqttoptions = MqttOptions::new(&config.mqtt.name, &config.mqtt_broker.host, config.mqtt_broker.port);
     mqttoptions.set_keep_alive(Duration::from_secs(5));
     mqttoptions.set_credentials(&config.mqtt_broker.username, config.mqtt_broker.password.expose_secret());
 
-    let (client, eventloop) = AsyncClient::new(mqttoptions, 10);
+    let (client, connection) = Client::new(mqttoptions, 10);
 
-    (client, eventloop)
+    (client, connection)
 }
 
 fn read_from_sensor(sensor: &mut BMP085BarometerThermometer<LinuxI2CDevice>) -> Result<(f32, f32), Box<dyn Error>> {
@@ -163,17 +174,17 @@ fn read_from_sensor(sensor: &mut BMP085BarometerThermometer<LinuxI2CDevice>) -> 
     Ok((temp, pressure))
 }
 
-async fn publish_sensor_data(client: &AsyncClient, config: &Data, temp: f32, pressure: f32) -> Result<(), ExitCode> {
-    publish_temperature(client, config, temp).await?;
-    publish_pressure(client, config, pressure).await?;
+fn publish_sensor_data(client: &Client, config: &Data, temp: f32, pressure: f32) -> Result<(), ExitCode> {
+    publish_temperature(client, config, temp)?;
+    publish_pressure(client, config, pressure)?;
     return Ok(());
 }
 
-async fn publish_temperature(client: &AsyncClient, config: &Data, temp: f32) -> Result<(), ExitCode> {
+fn publish_temperature(client: &Client, config: &Data, temp: f32) -> Result<(), ExitCode> {
     let topic = format!("homeassistant/sensor/{}Temperature/config", config.mqtt.room);
     debug!("Publishing sensor data to topic [{}]", topic);
     let msg = get_message(config, SensorComponent::Temperature, temp);
-    match client.try_publish(topic, QoS::AtMostOnce, true, msg) {
+    match client.publish(topic, QoS::AtMostOnce, true, msg) {
         Ok(_) => return Ok(()),
         Err(e) => {
             error!("Failed to publish temerature due to error: {}", e);
@@ -182,11 +193,11 @@ async fn publish_temperature(client: &AsyncClient, config: &Data, temp: f32) -> 
     };
 }
 
-async fn publish_pressure(client: &AsyncClient, config: &Data, pressure: f32) -> Result<(), ExitCode> {
+fn publish_pressure(client: &Client, config: &Data, pressure: f32) -> Result<(), ExitCode> {
     let topic = format!("homeassistant/sensor/{}Pressure/config", config.mqtt.room);
     debug!("Publishing sensor data to topic [{}]", topic);
     let msg = get_message(config, SensorComponent::Pressure, pressure);
-    match client.try_publish(topic, QoS::AtMostOnce, true, msg) {
+    match client.publish(topic, QoS::AtMostOnce, true, msg) {
         Ok(_) => return Ok(()),
         Err(e) => {
             error!("Failed to publish pressure due to error: {}", e);
