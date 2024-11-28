@@ -94,6 +94,13 @@ fn main() -> ExitCode {
 fn read_and_publish_data(mut sensor: BMP085BarometerThermometer<LinuxI2CDevice>, client: Client, config: Data) -> ExitCode {
     info!("Starting read and publish thread");
     
+    match publish_sensor_discovery_messages(&client, &config) {
+        Ok(_) => (),
+        Err(_) => {
+            return ExitCode::FAILURE
+        }
+    };
+    
     loop {
         thread::sleep(Duration::from_secs(1));
         let Ok((temp, pressure)) = read_from_sensor(&mut sensor) else {
@@ -175,50 +182,63 @@ fn read_from_sensor(sensor: &mut BMP085BarometerThermometer<LinuxI2CDevice>) -> 
 }
 
 fn publish_sensor_data(client: &Client, config: &Data, temp: f32, pressure: f32) -> Result<(), ExitCode> {
-    publish_temperature(client, config, temp)?;
-    publish_pressure(client, config, pressure)?;
+    let topic = format!("homeassistant/sensor/{}/state", config.mqtt.room);
+    debug!("Publishing sensor data to topic [{}]", topic);
+    let msg = get_state_message(temp, pressure);
+    match client.publish(topic, QoS::AtMostOnce, true, msg) {
+        Ok(_) => return Ok(()),
+        Err(e) => {
+            error!("Failed to publish sensor state message due to error: {}", e);
+            return Err(ExitCode::FAILURE);
+        }
+    };
+}
+
+fn publish_sensor_discovery_messages(client: &Client, config: &Data) -> Result<(), ExitCode> {
+    publish_temperature_discovery_message(client, config)?;
+    publish_pressure_discovery_message(client, config)?;
     return Ok(());
 }
 
-fn publish_temperature(client: &Client, config: &Data, temp: f32) -> Result<(), ExitCode> {
+fn publish_temperature_discovery_message(client: &Client, config: &Data) -> Result<(), ExitCode> {
     let topic = format!("homeassistant/sensor/{}Temperature/config", config.mqtt.room);
-    debug!("Publishing sensor data to topic [{}]", topic);
-    let msg = get_message(config, SensorComponent::Temperature, temp);
+    debug!("Publishing sensor temperature discovery message to topic [{}]", topic);
+    let msg = get_discovery_message(config, SensorComponent::Temperature);
     match client.publish(topic, QoS::AtMostOnce, true, msg) {
         Ok(_) => return Ok(()),
         Err(e) => {
-            error!("Failed to publish temerature due to error: {}", e);
+            error!("Failed to publish temerature discovery message due to error: {}", e);
             return Err(ExitCode::FAILURE);
         }
     };
 }
 
-fn publish_pressure(client: &Client, config: &Data, pressure: f32) -> Result<(), ExitCode> {
+fn publish_pressure_discovery_message(client: &Client, config: &Data) -> Result<(), ExitCode> {
     let topic = format!("homeassistant/sensor/{}Pressure/config", config.mqtt.room);
-    debug!("Publishing sensor data to topic [{}]", topic);
-    let msg = get_message(config, SensorComponent::Pressure, pressure);
+    debug!("Publishing sensor pressure discovery message to topic [{}]", topic);
+    let msg = get_discovery_message(config, SensorComponent::Pressure);
     match client.publish(topic, QoS::AtMostOnce, true, msg) {
         Ok(_) => return Ok(()),
         Err(e) => {
-            error!("Failed to publish pressure due to error: {}", e);
+            error!("Failed to publish pressure discovery message due to error: {}", e);
             return Err(ExitCode::FAILURE);
         }
     };
 }
 
-fn get_message(config: &Data, sensor_component: SensorComponent, temp: f32) -> String {
-    let sensor_component_str = match sensor_component {
-        SensorComponent::Temperature => "temperature",
-        SensorComponent::Pressure => "pressure"
+fn get_discovery_message(config: &Data, sensor_component: SensorComponent) -> String {
+    let (sensor_component_str, value_template_str, unit_str) = match sensor_component {
+        SensorComponent::Temperature => ("temperature", "value_json.temperature", "°C"),
+        SensorComponent::Pressure => ("pressure", "value_json.pressure", "kPa")
     };
 
-    let temperature_msg = format!("\
+    let discovery_msg = format!("\
 {{  
-   \"device_class\":\"{1}\",
+   \"device_class\":\"{0}\",
    \"state_topic\":\"homeassistant/sensor/{2}/state\",
-   \"unit_of_measurement\":\"°C\",
-   \"value_template\":\"{0}\",
-   \"unique_id\":\"{1}\",
+   \"unit_of_measurement\":\"{5}\",
+   \"value_template\":\"{{{{ {1} }}}}\",
+   \"unique_id\":\"{3}_{0}\",
    \"device\":{{
       \"identifiers\":[
           \"{3}\"
@@ -227,11 +247,22 @@ fn get_message(config: &Data, sensor_component: SensorComponent, temp: f32) -> S
     }}
 }}
 ",
-    temp,
     sensor_component_str,
+    value_template_str,
     config.mqtt.room,
     config.mqtt.identifier,
-    config.mqtt.name);
+    config.mqtt.name,
+    unit_str);
 
-    return temperature_msg;
+    return discovery_msg;
+}
+
+fn get_state_message(temp: f32, pressure: f32) -> String {
+    let state_msg = format!("\
+{{  
+   \"temperature\": {},
+   \"pressure\": {}
+}}
+", temp, pressure);
+    return state_msg;
 }
